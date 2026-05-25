@@ -1,162 +1,209 @@
 // ==UserScript==
-// @name         国内站点外部链接自动跳转
-// @namespace    https://github.com/nicepkg/fuck-jump-tips
-// @version      1.0.0
-// @description  自动跳过知乎、掘金、CSDN、微博、微信公众号、Gitee 等站点的外部链接确认页
-// @author       nicepkg
-// @match        *://link.zhihu.com/*
-// @match        *://link.juejin.cn/*
-// @match        *://link.csdn.net/*
-// @match        *://weibo.cn/sinaurl*
-// @match        *://mp.weixin.qq.com/mp/external_link_report*
-// @match        *://gitee.com/link*
-// @match        *://*.jianshu.com/go-wild*
-// @match        *://c.pc.qq.com/*
-// @match        *://www.so.com/link*
-// @match        *://www.sogou.com/link*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=zhihu.com
-// @grant        GM_xmlhttpRequest
-// @grant        GM_openInTab
-// @grant        window.close
+// @name         Auto Jump Cleaner (Rule Engine)
+// @namespace    http://tampermonkey.net/
+// @version      2.0
+// @description  自动跳过第三方跳转确认（规则引擎版）
+// @match        *://*/*
 // @run-at       document-start
-// @connect      *
+// @grant        none
 // ==/UserScript==
 
 (function () {
-    'use strict';
+  'use strict';
 
-    // 站点配置：域名 -> 提取规则
-    const SITE_RULES = [
-        {
-            name: '知乎',
-            test: (host, path) => host === 'link.zhihu.com',
-            getTarget: () => getUrlParam('target'),
-        },
-        {
-            name: '掘金',
-            test: (host, path) => host === 'link.juejin.cn',
-            getTarget: () => getUrlParam('target'),
-            // 掘金需要额外等待页面渲染后点击按钮（备用方案）
-            onFail: () => {
-                const btn = document.querySelector('#app .middle-page button');
-                if (btn) btn.click();
-            },
-        },
-        {
-            name: 'CSDN',
-            test: (host, path) => host === 'link.csdn.net',
-            getTarget: () => getUrlParam('target'),
-        },
-        {
-            name: '微博',
-            test: (host, path) => host === 'weibo.cn' && path.includes('/sinaurl'),
-            getTarget: () => getUrlParam('u') || getUrlParam('toasturl') || getUrlParam('url'),
-        },
-        {
-            name: '微信公众号',
-            test: (host, path) => host === 'mp.weixin.qq.com' && path.includes('/external_link_report'),
-            getTarget: () => getUrlParam('url'),
-        },
-        {
-            name: 'Gitee',
-            test: (host, path) => host === 'gitee.com' && path.includes('/link'),
-            // Gitee 使用 href 参数或直接从页面中的跳转链接提取
-            getTarget: () => {
-                const href = getUrlParam('href');
-                if (href) return href;
-                // 备用：从页面 meta refresh 或 script 中提取
-                const meta = document.querySelector('meta[http-equiv="refresh"]');
-                if (meta) {
-                    const match = meta.content.match(/url=(.+)/i);
-                    if (match) return decodeURIComponent(match[1]);
-                }
-                // 备用：从页面第一个链接提取
-                const link = document.querySelector('a[href]:not([href^="#"]):not([href^="javascript"])');
-                if (link && !link.href.includes('gitee.com')) return link.href;
-                return null;
-            },
-            // Gitee 可能需要等待页面加载
-            delay: 300,
-        },
-        {
-            name: '简书',
-            test: (host, path) => host.includes('jianshu.com') && path.includes('/go-wild'),
-            getTarget: () => getUrlParam('url'),
-        },
-        {
-            name: 'QQ',
-            test: (host, path) => host === 'c.pc.qq.com',
-            getTarget: () => getUrlParam('pfurl'),
-        },
-        {
-            name: '360搜索',
-            test: (host, path) => host === 'www.so.com' && path.includes('/link'),
-            getTarget: () => getUrlParam('url'),
-        },
-        {
-            name: '搜狗',
-            test: (host, path) => host === 'www.sogou.com' && path.includes('/link'),
-            getTarget: () => getUrlParam('url') || getUrlParam('web'),
-        },
-    ];
+  const DEBUG = false;
 
-    function getUrlParam(name) {
-        const value = new URLSearchParams(location.search).get(name);
-        if (!value) return null;
-        try {
-            return decodeURIComponent(value);
-        } catch {
-            return value;
-        }
+  /* ---------------- 工具 ---------------- */
+
+  const log = (...args) => DEBUG && console.log("[AutoJump]", ...args);
+
+  const getURLParam = (keys) => {
+    try {
+      const url = new URL(location.href);
+      for (const key of keys) {
+        const val = url.searchParams.get(key);
+        if (val) return decodeURIComponent(val);
+      }
+    } catch { }
+    return null;
+  };
+
+  const isExternal = (url) => {
+    try {
+      const u = new URL(url, location.origin);
+      return u.host !== location.host;
+    } catch {
+      return false;
     }
+  };
 
-    function redirect(targetUrl) {
-        if (!targetUrl) return false;
-        // 确保是完整 URL
-        if (!/^https?:\/\//i.test(targetUrl)) {
-            targetUrl = 'https://' + targetUrl;
-        }
-        // 使用 GM_openInTab 替换当前页面（可能需要目标站点允许）
-        // 如果目标站点被 CSP 限制，尝试 top.location
-        try {
-            window.top.location.href = targetUrl;
-        } catch {
-            location.href = targetUrl;
-        }
+  const isSimplePage = () =>
+    document.querySelectorAll("a,button").length <= 6;
+
+  const isRedirectLike = () => {
+    const text = document.body?.innerText || "";
+    return /即将离开|访问第三方|跳转提示/.test(text);
+  };
+
+  /* ---------------- 核心动作 ---------------- */
+
+  const Actions = {
+    bypass() {
+      const target = getURLParam(["url", "target", "dest", "u"]);
+      if (target && target.startsWith("http")) {
+        log("bypass →", target);
+        location.replace(target);
         return true;
+      }
+      return false;
+    },
+
+    autoClick() {
+      const KEYWORDS = ["继续", "前往", "访问", "跳转", "确定"];
+      const els = document.querySelectorAll("a,button");
+
+      for (const el of els) {
+        const text = (el.innerText || "").trim();
+        if (!text) continue;
+
+        if (!KEYWORDS.some(k => text.includes(k))) continue;
+
+        const href =
+          el.href ||
+          el.dataset?.url ||
+          el.getAttribute("data-href");
+
+        if (!href || !isExternal(href)) continue;
+
+        log("click →", text);
+        el.click();
+        return true;
+      }
+      return false;
+    },
+
+    accelerateTimer() {
+      const raw = window.setTimeout;
+      window.setTimeout = (fn, delay, ...args) => {
+        if (delay > 1000) delay = 0;
+        return raw(fn, delay, ...args);
+      };
     }
+  };
 
-    function main() {
-        const host = location.hostname;
-        const path = location.pathname;
+  /* ---------------- 规则定义 ---------------- */
 
-        const rule = SITE_RULES.find(r => r.test(host, path));
-        if (!rule) return;
+  function isVisible(el) {
+    return !!(
+      el &&
+      el.offsetParent !== null &&
+      getComputedStyle(el).visibility !== "hidden"
+    );
+  }
 
-        const delay = rule.delay || 0;
+  function waitAndClick(selector, options = {}) {
+    const { once = true, timeout = 10000 } = options;
 
-        const attempt = () => {
-            const target = rule.getTarget();
-            if (target) {
-                console.log(`[自动跳转] ${rule.name}: ${target}`);
-                redirect(target);
-            } else if (rule.onFail) {
-                console.log(`[自动跳转] ${rule.name}: URL 提取失败，尝试备用方案`);
-                rule.onFail();
-            }
-        };
+    let done = false;
 
-        if (delay > 0) {
-            setTimeout(attempt, delay);
-        } else {
-            // 尽可能早地执行
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', attempt);
-            } else {
-                attempt();
-            }
+    const observer = new MutationObserver(() => {
+      if (done) return;
+
+      const el = document.querySelector(selector);
+
+      if (el && isVisible(el)) {
+        el.click();
+        done = true;
+
+        if (once) observer.disconnect();
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+
+    // 超时保护
+    if (timeout) {
+      setTimeout(() => observer.disconnect(), timeout);
+    }
+    return true;
+  }
+  const rules = [
+    // ❌ 完全禁用（防误触站点）
+    {
+      name: "block-linuxdo",
+      match: () => location.host.includes("linux.do"),
+      run: () => {
+        waitAndClick(".modal-container .d-modal__footer button.btn.btn-icon-text.btn-primary");
+        return true;
+      }
+    },
+
+    // ✅ URL 直跳（最高优先级）
+    {
+      name: "direct-bypass",
+      match: () => true,
+      run: () => Actions.bypass()
+    },
+
+    // ✅ 已知跳转站
+    {
+      name: "known-redirect",
+      match: () =>
+        ["link.zhihu.com", "weibo.cn", "jump.bdimg.com"]
+          .some(h => location.host.includes(h)),
+      run: () => {
+        Actions.accelerateTimer();
+        return Actions.autoClick();
+      }
+    },
+
+    // ✅ 通用安全策略（严格限制）
+    {
+      name: "generic-safe",
+      match: () => isRedirectLike() && isSimplePage(),
+      run: () => {
+        Actions.accelerateTimer();
+        return Actions.autoClick();
+      }
+    }
+  ];
+
+  /* ---------------- 引擎 ---------------- */
+
+  function runEngine() {
+    for (const rule of rules) {
+      try {
+        if (rule.match()) {
+          log("rule:", rule.name);
+
+          const done = rule.run();
+          if (done) return;
         }
+      } catch (e) {
+        log("error:", e);
+      }
     }
+  }
 
-    main();
+  /* ---------------- 启动 ---------------- */
+
+  function init() {
+    runEngine();
+
+    window.addEventListener("DOMContentLoaded", () => {
+      const observer = new MutationObserver(runEngine);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+
+      runEngine();
+    });
+  }
+
+  init();
+
 })();
