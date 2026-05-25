@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Auto Jump Cleaner (Rule Engine)
-// @namespace    http://tampermonkey.net/
-// @version      2.0
+// @name         外部链接自动跳转 Auto Jump Cleaner (Rule Engine)
+// @namespace    https://github.com/dengshenkk/fuck-jump-tips
+// @version      1.01
 // @description  自动跳过第三方跳转确认（规则引擎版）
 // @match        *://*/*
 // @run-at       document-start
